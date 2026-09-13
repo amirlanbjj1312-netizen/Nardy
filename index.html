@@ -213,32 +213,47 @@ function captureFrame() {
   return canvas;
 }
 
-// downscaled grayscale mean + histogram signature for a zone, used for cheap presence/stillness checks
+// downscaled grayscale signature for a zone, used for cheap presence/stillness checks
+const SIG_GRID = 32;
 function zoneSignature(canvas, z) {
   const sx = Math.round(z.x * canvas.width);
   const sy = Math.round(z.y * canvas.height);
   const sw = Math.round(z.w * canvas.width);
   const sh = Math.round(z.h * canvas.height);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const small = document.createElement('canvas');
-  small.width = 24; small.height = 24;
+  small.width = SIG_GRID; small.height = SIG_GRID;
   const sctx = small.getContext('2d', { willReadFrequently: true });
-  sctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, 24, 24);
-  const data = sctx.getImageData(0, 0, 24, 24).data;
-  const gray = new Float32Array(24*24);
+  sctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, SIG_GRID, SIG_GRID);
+  const data = sctx.getImageData(0, 0, SIG_GRID, SIG_GRID).data;
+  const n = SIG_GRID * SIG_GRID;
+  const gray = new Float32Array(n);
   let sum = 0;
-  for (let i = 0; i < 24*24; i++) {
+  for (let i = 0; i < n; i++) {
     const v = 0.299*data[i*4] + 0.587*data[i*4+1] + 0.114*data[i*4+2];
     gray[i] = v;
     sum += v;
   }
-  return { gray, mean: sum/(24*24) };
+  return { gray, mean: sum/n };
 }
 
+// Average per-cell difference. Diluted to near-zero by a wide zone when only a small
+// area (like two dice) actually changed, so this alone can't detect presence reliably
+// once the zone covers most of the frame — see sigHotCells below.
 function sigDiff(a, b) {
   let d = 0;
   for (let i = 0; i < a.gray.length; i++) d += Math.abs(a.gray[i] - b.gray[i]);
   return d / a.gray.length;
+}
+
+// Counts cells that changed sharply between two signatures. Catches a small but
+// high-contrast object (dice on wood) even when it's a tiny fraction of a wide zone,
+// where the plain average difference above would get washed out.
+function sigHotCells(a, b, threshold) {
+  let count = 0;
+  for (let i = 0; i < a.gray.length; i++) {
+    if (Math.abs(a.gray[i] - b.gray[i]) > threshold) count++;
+  }
+  return count;
 }
 
 // Crops a zone out of a full-res frame into a JPEG (aspect ratio preserved, capped at maxDim
@@ -333,7 +348,8 @@ calibBtn.addEventListener('click', () => {
     const frame = captureFrame();
     const sig = zoneSignature(frame, boardZone);
     const diff = sigDiff(sig, boardZone.bgSig);
-    if (diff < 6) {
+    const hotCells = sigHotCells(sig, boardZone.bgSig, 35);
+    if (diff < 6 && hotCells < 3) {
       const msg = 'Не вижу ничего нового на столе. Убедитесь, что кубики попали в кадр, и нажмите ещё раз.';
       calibText.textContent = msg;
       speak(msg);
@@ -381,7 +397,8 @@ function startWatching() {
     const frame = captureFrame();
     const sig = zoneSignature(frame, boardZone);
     const bgDiff = sigDiff(sig, boardZone.bgSig);
-    const present = bgDiff > 6;
+    const hotCells = sigHotCells(sig, boardZone.bgSig, 35);
+    const present = bgDiff > 6 || hotCells >= 3;
     presentStreak = present ? presentStreak + 1 : 0;
 
     if (prevSig && present) {
