@@ -157,7 +157,10 @@ let awaitingClear = false; // true right after an announcement, until the zone e
 async function startCamera() {
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      // Higher capture resolution matters here: the board zone now covers most of the
+      // frame, so each die is a small part of it — a low-res capture leaves too few
+      // pixels on the dice themselves for the AI to read reliably.
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
       audio: false
     });
     video.srcObject = stream;
@@ -275,9 +278,9 @@ function cropZoneBase64(sourceCanvas, z, maxDim) {
 // Asks the /api/detect-dice backend (Claude vision) to find and read both dice anywhere
 // in the board zone. Returns [d1, d2] or null on any failure.
 async function detectDiceAI(frame) {
-  const image = cropZoneBase64(frame, boardZone, 900);
+  const image = cropZoneBase64(frame, boardZone, 1500);
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 9000);
+  const timeoutId = setTimeout(() => controller.abort(), 12000);
   try {
     const resp = await fetch('/api/detect-dice', {
       method: 'POST',
