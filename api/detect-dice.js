@@ -1,7 +1,7 @@
 // Vercel serverless function: counts pips on two dice images using Claude vision.
 // Keeps the Anthropic API key server-side only.
 
-const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5';
+const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-5';
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const MAX_IMAGE_CHARS = 2_000_000; // ~1.5MB base64, generous cap for a 320x320 JPEG
 
@@ -67,6 +67,7 @@ module.exports = async (req, res) => {
 
     if (!upstream.ok) {
       const errText = await upstream.text().catch(() => '');
+      console.error('detect-dice: upstream_error', upstream.status, errText.slice(0, 500));
       res.status(502).json({ error: 'upstream_error', detail: errText.slice(0, 300) });
       return;
     }
@@ -75,6 +76,7 @@ module.exports = async (req, res) => {
     const text = (data.content || []).map(b => b.text || '').join('').trim();
     const match = text.match(/\{[\s\S]*\}/);
     if (!match) {
+      console.error('detect-dice: parse_error, raw text:', text.slice(0, 500));
       res.status(502).json({ error: 'parse_error' });
       return;
     }
@@ -82,6 +84,7 @@ module.exports = async (req, res) => {
     let parsed;
     try { parsed = JSON.parse(match[0]); } catch { parsed = null; }
     if (!parsed) {
+      console.error('detect-dice: parse_error, match:', match[0].slice(0, 500));
       res.status(502).json({ error: 'parse_error' });
       return;
     }
@@ -90,6 +93,7 @@ module.exports = async (req, res) => {
     const die2 = Number.isInteger(parsed.die2) ? parsed.die2 : null;
     const inRange = (n) => n === null || (n >= 1 && n <= 6);
     if (!inRange(die1) || !inRange(die2)) {
+      console.error('detect-dice: out_of_range', JSON.stringify(parsed));
       res.status(502).json({ error: 'out_of_range' });
       return;
     }
@@ -98,6 +102,7 @@ module.exports = async (req, res) => {
   } catch (err) {
     clearTimeout(timeout);
     const isAbort = err && err.name === 'AbortError';
+    console.error('detect-dice: caught error', isAbort ? 'timeout' : String(err));
     res.status(isAbort ? 504 : 500).json({ error: isAbort ? 'timeout' : 'server_error' });
   }
 };
