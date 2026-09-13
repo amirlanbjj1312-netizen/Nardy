@@ -241,22 +241,53 @@ function zoneSignature(canvas, z) {
 
 // Average per-cell difference. Diluted to near-zero by a wide zone when only a small
 // area (like two dice) actually changed, so this alone can't detect presence reliably
-// once the zone covers most of the frame — see sigHotCells below.
+// once the zone covers most of the frame — see sigHotRegion below.
 function sigDiff(a, b) {
   let d = 0;
   for (let i = 0; i < a.gray.length; i++) d += Math.abs(a.gray[i] - b.gray[i]);
   return d / a.gray.length;
 }
 
-// Counts cells that changed sharply between two signatures. Catches a small but
+// Finds cells that changed sharply between two signatures — catches a small but
 // high-contrast object (dice on wood) even when it's a tiny fraction of a wide zone,
-// where the plain average difference above would get washed out.
-function sigHotCells(a, b, threshold) {
-  let count = 0;
-  for (let i = 0; i < a.gray.length; i++) {
-    if (Math.abs(a.gray[i] - b.gray[i]) > threshold) count++;
+// where the plain average difference above would get washed out. Also returns the
+// bounding box of those cells (in grid coordinates), so callers can crop tightly
+// around wherever the dice actually are instead of sending the whole wide zone —
+// far more effective pixels-per-die once cropped near-natively instead of downscaled.
+function sigHotRegion(a, b, threshold, grid) {
+  let count = 0, minR = Infinity, maxR = -1, minC = Infinity, maxC = -1;
+  for (let r = 0; r < grid; r++) {
+    for (let c = 0; c < grid; c++) {
+      const i = r * grid + c;
+      if (Math.abs(a.gray[i] - b.gray[i]) > threshold) {
+        count++;
+        if (r < minR) minR = r;
+        if (r > maxR) maxR = r;
+        if (c < minC) minC = c;
+        if (c > maxC) maxC = c;
+      }
+    }
   }
-  return count;
+  return count === 0 ? { count } : { count, minR, maxR, minC, maxC };
+}
+
+// Expands a grid-coordinate bounding box (from sigHotRegion) into a fractional zone,
+// padded generously since the box only covers pixels that changed sharply — the dice
+// themselves extend a bit further, and a little context around them helps the AI.
+function bboxToZone(bbox, grid) {
+  const cellW = boardZone.w / grid;
+  const cellH = boardZone.h / grid;
+  const pad = 3;
+  const minC = Math.max(0, bbox.minC - pad);
+  const maxC = Math.min(grid - 1, bbox.maxC + pad);
+  const minR = Math.max(0, bbox.minR - pad);
+  const maxR = Math.min(grid - 1, bbox.maxR + pad);
+  return {
+    x: boardZone.x + minC * cellW,
+    y: boardZone.y + minR * cellH,
+    w: (maxC - minC + 1) * cellW,
+    h: (maxR - minR + 1) * cellH
+  };
 }
 
 // Crops a zone out of a full-res frame into a JPEG (aspect ratio preserved, capped at maxDim
@@ -275,10 +306,13 @@ function cropZoneBase64(sourceCanvas, z, maxDim) {
   return out.toDataURL('image/jpeg', 0.85).split(',')[1];
 }
 
-// Asks the /api/detect-dice backend (Claude vision) to find and read both dice anywhere
-// in the board zone. Returns [d1, d2] or null on any failure.
-async function detectDiceAI(frame) {
-  const image = cropZoneBase64(frame, boardZone, 1500);
+// Asks the /api/detect-dice backend (Claude vision) to find and read both dice. When a
+// hot-cell bounding box is available (where the watch loop detected the change), crops
+// tightly around it instead of the whole board zone — much higher effective resolution
+// per die. Returns [d1, d2] or null on any failure.
+async function detectDiceAI(frame, hotBBox) {
+  const cropZone = hotBBox ? bboxToZone(hotBBox, SIG_GRID) : boardZone;
+  const image = cropZoneBase64(frame, cropZone, 1500);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 12000);
   try {
@@ -318,9 +352,9 @@ function speak(text) {
   window.speechSynthesis.speak(u);
 }
 
-async function readDiceNow() {
-  const frame = captureFrame();
-  const results = await detectDiceAI(frame);
+async function readDiceNow(frame, hotBBox) {
+  frame = frame || captureFrame();
+  const results = await detectDiceAI(frame, hotBBox);
   setAiState(results ? 'on' : 'off');
 
   if (!results) {
@@ -351,7 +385,7 @@ calibBtn.addEventListener('click', () => {
     const frame = captureFrame();
     const sig = zoneSignature(frame, boardZone);
     const diff = sigDiff(sig, boardZone.bgSig);
-    const hotCells = sigHotCells(sig, boardZone.bgSig, 35);
+    const hotCells = sigHotRegion(sig, boardZone.bgSig, 35, SIG_GRID).count;
     if (diff < 6 && hotCells < 3) {
       const msg = 'Не вижу ничего нового на столе. Убедитесь, что кубики попали в кадр, и нажмите ещё раз.';
       calibText.textContent = msg;
@@ -400,8 +434,8 @@ function startWatching() {
     const frame = captureFrame();
     const sig = zoneSignature(frame, boardZone);
     const bgDiff = sigDiff(sig, boardZone.bgSig);
-    const hotCells = sigHotCells(sig, boardZone.bgSig, 35);
-    const present = bgDiff > 6 || hotCells >= 3;
+    const hot = sigHotRegion(sig, boardZone.bgSig, 35, SIG_GRID);
+    const present = bgDiff > 6 || hot.count >= 3;
     presentStreak = present ? presentStreak + 1 : 0;
 
     if (prevSig && present) {
@@ -423,7 +457,7 @@ function startWatching() {
     }
     if (stillCount >= 2 || presentStreak >= MAX_WAIT_TICKS) {
       setLiveTag('settled');
-      readDiceNow();
+      readDiceNow(frame, hot.count >= 3 ? hot : null);
       awaitingClear = true;
     } else {
       setLiveTag('moving');
