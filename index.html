@@ -104,7 +104,7 @@
     <div id="aiState" class="hidden" aria-hidden="true"></div>
 
     <div id="calibBar" class="hidden">
-      <p id="calibText">Шаг 1: уберите всё со стола, оставьте только пустую поверхность в рамках, затем нажмите кнопку.</p>
+      <p id="calibText">Шаг 1: уберите всё со стола, оставьте только пустую поверхность в кадре, затем нажмите кнопку.</p>
       <button id="calibBtn">Стол пустой — запомнить</button>
     </div>
   </div>
@@ -144,21 +144,15 @@ const aiState = document.getElementById('aiState');
 let lastPhrase = '';
 let stream = null;
 let watchLoopId = null;
-let aiAvailable = true; // flips to false after AI calls start failing, so we stop retrying every roll
 
-const zones = [
-  { x: 0.12, y: 0.30, w: 0.32, h: 0.32, label: '1' },
-  { x: 0.56, y: 0.30, w: 0.32, h: 0.32, label: '2' }
-];
-
-// calibration state per zone
-// bg: {mean} of empty table; dice: {mean, pipIsDark, footprintScore} with dice present
-zones.forEach(z => { z.bg = null; z.dice = null; });
+// One wide zone covering almost the whole frame — dice can land anywhere on the
+// board, not in a small pre-marked box, so the AI is given the whole area and
+// has to locate both dice itself.
+const boardZone = { x: 0.04, y: 0.06, w: 0.92, h: 0.88, bgSig: null };
 
 let calibStage = 0; // 0 = capture empty table, 1 = capture dice, 2 = done
 let watching = false;
-let stillFrames = 0;
-let awaitingClear = false; // true right after an announcement, until zone empties again
+let awaitingClear = false; // true right after an announcement, until the zone empties again
 
 async function startCamera() {
   try {
@@ -199,17 +193,15 @@ function drawZones(activeColor) {
   octx.clearRect(0, 0, overlay.width, overlay.height);
   octx.lineWidth = 3;
   octx.font = '16px sans-serif';
-  zones.forEach(z => {
-    const x = z.x * overlay.width;
-    const y = z.y * overlay.height;
-    const w = z.w * overlay.width;
-    const h = z.h * overlay.height;
-    const color = activeColor || '#f4b942';
-    octx.strokeStyle = color;
-    octx.fillStyle = color;
-    octx.strokeRect(x, y, w, h);
-    octx.fillText('Кубик ' + z.label, x + 6, y - 8 < 14 ? y + 20 : y - 8);
-  });
+  const x = boardZone.x * overlay.width;
+  const y = boardZone.y * overlay.height;
+  const w = boardZone.w * overlay.width;
+  const h = boardZone.h * overlay.height;
+  const color = activeColor || '#f4b942';
+  octx.strokeStyle = color;
+  octx.fillStyle = color;
+  octx.strokeRect(x, y, w, h);
+  octx.fillText('Зона броска', x + 6, y - 8 < 14 ? y + 20 : y - 8);
 }
 
 function captureFrame() {
@@ -249,110 +241,52 @@ function sigDiff(a, b) {
   return d / a.gray.length;
 }
 
-// full-res pip counting within a zone (same approach as before, tuned by calibration if available)
-function countPipsInZone(sourceCanvas, z) {
+// Crops a zone out of a full-res frame into a JPEG (aspect ratio preserved, capped at maxDim
+// on the longer side), base64-encoded (no data-URL prefix).
+function cropZoneBase64(sourceCanvas, z, maxDim) {
   const sx = Math.round(z.x * sourceCanvas.width);
   const sy = Math.round(z.y * sourceCanvas.height);
   const sw = Math.round(z.w * sourceCanvas.width);
   const sh = Math.round(z.h * sourceCanvas.height);
-  const sctx = sourceCanvas.getContext('2d', { willReadFrequently: true });
-  const imgData = sctx.getImageData(sx, sy, sw, sh);
-  const data = imgData.data;
-  const n = sw * sh;
-
-  const gray = new Float32Array(n);
-  let sum = 0;
-  for (let i = 0; i < n; i++) {
-    const v = 0.299*data[i*4] + 0.587*data[i*4+1] + 0.114*data[i*4+2];
-    gray[i] = v; sum += v;
-  }
-  const mean = sum / n;
-
-  let pipIsDark;
-  if (z.dice && typeof z.dice.pipIsDark === 'boolean') {
-    pipIsDark = z.dice.pipIsDark;
-  } else {
-    let below = 0, above = 0;
-    for (let i = 0; i < n; i++) {
-      if (gray[i] < mean - 25) below++; else if (gray[i] > mean + 25) above++;
-    }
-    pipIsDark = below <= above;
-  }
-
-  const visited = new Uint8Array(n);
-  const threshold = 25;
-  function isPip(i) { return pipIsDark ? (gray[i] < mean - threshold) : (gray[i] > mean + threshold); }
-
-  let blobCount = 0;
-  const stack = [];
-  const minSize = Math.max(4, Math.round(n * 0.0008));
-  const maxSize = Math.round(n * 0.06);
-
-  for (let idx = 0; idx < n; idx++) {
-    if (visited[idx] || !isPip(idx)) continue;
-    stack.length = 0; stack.push(idx); visited[idx] = 1;
-    let size = 0;
-    while (stack.length) {
-      const cur = stack.pop(); size++;
-      const cx = cur % sw, cy = (cur / sw) | 0;
-      const nb = [[cx-1,cy],[cx+1,cy],[cx,cy-1],[cx,cy+1]];
-      for (const [nx, ny] of nb) {
-        if (nx < 0 || ny < 0 || nx >= sw || ny >= sh) continue;
-        const ni = ny*sw + nx;
-        if (!visited[ni] && isPip(ni)) { visited[ni] = 1; stack.push(ni); }
-      }
-    }
-    if (size >= minSize && size <= maxSize) blobCount++;
-  }
-  if (blobCount > 6) blobCount = 6;
-  if (blobCount < 1) return null; // couldn't find clear pips — don't guess a fake result
-  return blobCount;
-}
-
-// Crops a zone out of a full-res frame into a small square JPEG, base64-encoded (no data-URL prefix).
-function cropZoneBase64(sourceCanvas, z, size) {
-  const sx = Math.round(z.x * sourceCanvas.width);
-  const sy = Math.round(z.y * sourceCanvas.height);
-  const sw = Math.round(z.w * sourceCanvas.width);
-  const sh = Math.round(z.h * sourceCanvas.height);
+  const scale = Math.min(1, maxDim / Math.max(sw, sh));
+  const outW = Math.max(1, Math.round(sw * scale));
+  const outH = Math.max(1, Math.round(sh * scale));
   const out = document.createElement('canvas');
-  out.width = size; out.height = size;
-  const octx2 = out.getContext('2d');
-  octx2.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, size, size);
+  out.width = outW; out.height = outH;
+  out.getContext('2d').drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, outW, outH);
   return out.toDataURL('image/jpeg', 0.85).split(',')[1];
 }
 
-// Asks the /api/detect-dice backend (Claude vision) to read both dice. Returns [d1, d2] or null on any failure.
+// Asks the /api/detect-dice backend (Claude vision) to find and read both dice anywhere
+// in the board zone. Returns [d1, d2] or null on any failure.
 async function detectDiceAI(frame) {
-  const images = zones.map(z => cropZoneBase64(frame, z, 320));
+  const image = cropZoneBase64(frame, boardZone, 900);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 9000);
   try {
     const resp = await fetch('/api/detect-dice', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ images }),
+      body: JSON.stringify({ image }),
       signal: controller.signal
     });
     clearTimeout(timeoutId);
-    if (!resp.ok) { aiAvailable = false; return null; }
+    if (!resp.ok) return null;
     const data = await resp.json();
     const inRange = n => Number.isInteger(n) && n >= 1 && n <= 6;
     if (!inRange(data.die1) || !inRange(data.die2)) return null;
-    aiAvailable = true;
     return [data.die1, data.die2];
   } catch (err) {
     clearTimeout(timeoutId);
-    aiAvailable = false;
     return null;
   }
 }
 
 function setAiState(mode) {
   aiState.classList.remove('hidden', 'on', 'off');
-  if (mode === 'checking') { aiState.textContent = 'ИИ: проверяю…'; }
-  else if (mode === 'on') { aiState.classList.add('on'); aiState.textContent = 'ИИ-распознавание'; }
-  else { aiState.classList.add('off'); aiState.textContent = 'Локальный режим'; }
+  if (mode === 'checking') { aiState.textContent = 'Жду первый бросок'; }
+  else if (mode === 'on') { aiState.classList.add('on'); aiState.textContent = 'ИИ на связи'; }
+  else { aiState.classList.add('off'); aiState.textContent = 'Нет ответа от ИИ'; }
 }
 
 function speak(text) {
@@ -368,23 +302,13 @@ function speak(text) {
 
 async function readDiceNow() {
   const frame = captureFrame();
-  let results = null;
-  let usedAI = false;
-
-  if (aiAvailable) {
-    results = await detectDiceAI(frame);
-    if (results) usedAI = true;
-  }
-  if (!results) {
-    const local = zones.map(z => countPipsInZone(frame, z));
-    if (local.every(v => v !== null)) results = local;
-  }
-  setAiState(usedAI ? 'on' : 'off');
+  const results = await detectDiceAI(frame);
+  setAiState(results ? 'on' : 'off');
 
   if (!results) {
     bigResult.textContent = '—';
     subResult.textContent = 'Не удалось разглядеть кубики';
-    speak('Не удалось разглядеть кубики. Уберите их и киньте ещё раз, или поправьте свет.');
+    speak('Не удалось разглядеть кубики. Проверьте интернет или свет, и киньте ещё раз.');
     return;
   }
 
@@ -400,37 +324,17 @@ async function readDiceNow() {
 calibBtn.addEventListener('click', () => {
   if (calibStage === 0) {
     const frame = captureFrame();
-    zones.forEach(z => { z.bgSig = zoneSignature(frame, z); });
+    boardZone.bgSig = zoneSignature(frame, boardZone);
     calibStage = 1;
-    calibText.textContent = 'Шаг 2: положите ваши кубики в обе рамки так, как они обычно лежат при игре, затем нажмите кнопку.';
-    calibBtn.textContent = 'Кубики видно — запомнить';
-    speak('Стол запомнен. Теперь положите кубики в обе рамки и нажмите кнопку ещё раз.');
+    calibText.textContent = 'Шаг 2: киньте кубики в кадр — так, как обычно бросаете при игре, затем нажмите кнопку.';
+    calibBtn.textContent = 'Кубики на столе — запомнить';
+    speak('Стол запомнен. Теперь киньте кубики в кадр и нажмите кнопку ещё раз.');
   } else if (calibStage === 1) {
     const frame = captureFrame();
-    let ok = true;
-    zones.forEach(z => {
-      const sig = zoneSignature(frame, z);
-      const diff = sigDiff(sig, z.bgSig);
-      if (diff < 6) ok = false; // nothing new detected in this zone
-      // determine pip polarity using full-res crop
-      const sx = Math.round(z.x * frame.width), sy = Math.round(z.y * frame.height);
-      const sw = Math.round(z.w * frame.width), sh = Math.round(z.h * frame.height);
-      const ctx = frame.getContext('2d', { willReadFrequently: true });
-      const data = ctx.getImageData(sx, sy, sw, sh).data;
-      const n = sw*sh;
-      let sum = 0;
-      const gray = new Float32Array(n);
-      for (let i = 0; i < n; i++) {
-        const v = 0.299*data[i*4]+0.587*data[i*4+1]+0.114*data[i*4+2];
-        gray[i]=v; sum+=v;
-      }
-      const mean = sum/n;
-      let below=0, above=0;
-      for (let i=0;i<n;i++){ if (gray[i]<mean-25) below++; else if (gray[i]>mean+25) above++; }
-      z.dice = { pipIsDark: below <= above };
-    });
-    if (!ok) {
-      const msg = 'Не вижу кубиков в одной из рамок. Передвиньте их внутрь рамок и нажмите ещё раз.';
+    const sig = zoneSignature(frame, boardZone);
+    const diff = sigDiff(sig, boardZone.bgSig);
+    if (diff < 6) {
+      const msg = 'Не вижу ничего нового на столе. Убедитесь, что кубики попали в кадр, и нажмите ещё раз.';
       calibText.textContent = msg;
       speak(msg);
       return;
@@ -456,18 +360,18 @@ function setLiveTag(state) {
   else if (state === 'settled') { liveTag.classList.add('settled'); liveTagText.textContent = 'Читаю...'; }
 }
 
-// Lightweight loop: every 350ms compare a cheap downscaled signature per zone
-// against background to detect presence, and against the previous check to detect stillness.
+// Lightweight loop: every 350ms compare a cheap downscaled signature of the whole board
+// zone against the background to detect presence, and against the previous check to
+// detect stillness.
 function startWatching() {
   if (watching) return;
   watching = true;
-  let prevSigs = zones.map(() => null);
-  let stillCounts = zones.map(() => 0);
-  let presentStreak = zones.map(() => 0);
+  let prevSig = null;
+  let stillCount = 0;
+  let presentStreak = 0;
   // A handheld phone never sits perfectly still, so waiting for a "perfect" match can hang
-  // forever. Once a zone has looked occupied for ~7s straight, force a read on the best
-  // available frame instead of staying silent — the AI reader tolerates a bit of blur far
-  // better than the old pixel-blob counter did.
+  // forever. Once the zone has looked occupied for ~7s straight, force a read on the best
+  // available frame instead of staying silent.
   const MAX_WAIT_TICKS = 20;
 
   setLiveTag('empty');
@@ -475,37 +379,29 @@ function startWatching() {
   watchLoopId = setInterval(() => {
     if (!video.videoWidth) return;
     const frame = captureFrame();
-    let allPresent = true;
-    let allStill = true;
-    let anyPresent = false;
+    const sig = zoneSignature(frame, boardZone);
+    const bgDiff = sigDiff(sig, boardZone.bgSig);
+    const present = bgDiff > 6;
+    presentStreak = present ? presentStreak + 1 : 0;
 
-    zones.forEach((z, i) => {
-      const sig = zoneSignature(frame, z);
-      const bgDiff = sigDiff(sig, z.bgSig);
-      const present = bgDiff > 6;
-      if (present) { anyPresent = true; presentStreak[i]++; } else { allPresent = false; presentStreak[i] = 0; }
+    if (prevSig && present) {
+      const moveDiff = sigDiff(sig, prevSig);
+      stillCount = moveDiff < 4 ? stillCount + 1 : 0;
+    } else {
+      stillCount = 0;
+    }
+    prevSig = sig;
 
-      if (prevSigs[i] && present) {
-        const moveDiff = sigDiff(sig, prevSigs[i]);
-        if (moveDiff < 4) stillCounts[i]++; else stillCounts[i] = 0;
-      } else {
-        stillCounts[i] = 0;
-      }
-      const zoneReady = stillCounts[i] >= 2 || presentStreak[i] >= MAX_WAIT_TICKS;
-      if (!zoneReady) allStill = false;
-      prevSigs[i] = sig;
-    });
-
-    if (!anyPresent) {
+    if (!present) {
       awaitingClear = false;
       setLiveTag('empty');
       return;
     }
     if (awaitingClear) {
       setLiveTag('moving');
-      return; // already announced this occurrence, wait for table to clear first
+      return; // already announced this occurrence, wait for the table to clear first
     }
-    if (allPresent && allStill) {
+    if (stillCount >= 2 || presentStreak >= MAX_WAIT_TICKS) {
       setLiveTag('settled');
       readDiceNow();
       awaitingClear = true;
@@ -524,7 +420,7 @@ recalBtn.addEventListener('click', () => {
   controls.classList.add('hidden');
   liveTag.classList.add('hidden');
   aiState.classList.add('hidden');
-  calibText.textContent = 'Шаг 1: уберите всё со стола, оставьте только пустую поверхность в рамках, затем нажмите кнопку.';
+  calibText.textContent = 'Шаг 1: уберите всё со стола, оставьте только пустую поверхность в кадре, затем нажмите кнопку.';
   calibBtn.textContent = 'Стол пустой — запомнить';
   headerText.textContent = 'Наведите камеру на стол';
   bigResult.textContent = '—';
