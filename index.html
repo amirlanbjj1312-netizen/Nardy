@@ -305,7 +305,7 @@ function countPipsInZone(sourceCanvas, z) {
     if (size >= minSize && size <= maxSize) blobCount++;
   }
   if (blobCount > 6) blobCount = 6;
-  if (blobCount < 1) blobCount = 1;
+  if (blobCount < 1) return null; // couldn't find clear pips — don't guess a fake result
   return blobCount;
 }
 
@@ -376,9 +376,17 @@ async function readDiceNow() {
     if (results) usedAI = true;
   }
   if (!results) {
-    results = zones.map(z => countPipsInZone(frame, z));
+    const local = zones.map(z => countPipsInZone(frame, z));
+    if (local.every(v => v !== null)) results = local;
   }
   setAiState(usedAI ? 'on' : 'off');
+
+  if (!results) {
+    bigResult.textContent = '—';
+    subResult.textContent = 'Не удалось разглядеть кубики';
+    speak('Не удалось разглядеть кубики. Уберите их и киньте ещё раз, или поправьте свет.');
+    return;
+  }
 
   const total = results.reduce((a,b) => a+b, 0);
   bigResult.textContent = results.join('  —  ');
@@ -455,6 +463,12 @@ function startWatching() {
   watching = true;
   let prevSigs = zones.map(() => null);
   let stillCounts = zones.map(() => 0);
+  let presentStreak = zones.map(() => 0);
+  // A handheld phone never sits perfectly still, so waiting for a "perfect" match can hang
+  // forever. Once a zone has looked occupied for ~7s straight, force a read on the best
+  // available frame instead of staying silent — the AI reader tolerates a bit of blur far
+  // better than the old pixel-blob counter did.
+  const MAX_WAIT_TICKS = 20;
 
   setLiveTag('empty');
 
@@ -469,15 +483,16 @@ function startWatching() {
       const sig = zoneSignature(frame, z);
       const bgDiff = sigDiff(sig, z.bgSig);
       const present = bgDiff > 6;
-      if (present) anyPresent = true; else allPresent = false;
+      if (present) { anyPresent = true; presentStreak[i]++; } else { allPresent = false; presentStreak[i] = 0; }
 
       if (prevSigs[i] && present) {
         const moveDiff = sigDiff(sig, prevSigs[i]);
-        if (moveDiff < 2.5) stillCounts[i]++; else stillCounts[i] = 0;
+        if (moveDiff < 4) stillCounts[i]++; else stillCounts[i] = 0;
       } else {
         stillCounts[i] = 0;
       }
-      if (stillCounts[i] < 3) allStill = false;
+      const zoneReady = stillCounts[i] >= 2 || presentStreak[i] >= MAX_WAIT_TICKS;
+      if (!zoneReady) allStill = false;
       prevSigs[i] = sig;
     });
 
