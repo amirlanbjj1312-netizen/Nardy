@@ -67,6 +67,13 @@
     font-size: 14px; color: var(--dim); background: rgba(0,0,0,0.4);
     padding: 4px; border-radius: 8px; z-index: 12;
   }
+  #aiState {
+    position: absolute; bottom: 10px; left: 10px;
+    background: rgba(0,0,0,0.55); color: var(--dim); font-size: 12px;
+    padding: 4px 10px; border-radius: 20px; z-index: 12;
+  }
+  #aiState.on { color: var(--good); }
+  #aiState.off { color: var(--bad); }
   #liveTag {
     position: absolute; top: 10px; left: 10px;
     background: rgba(0,0,0,0.55); color: var(--dim); font-size: 13px;
@@ -92,8 +99,9 @@
   <div id="stage">
     <video id="video" autoplay playsinline muted></video>
     <canvas id="overlay" class="overlay"></canvas>
-    <div id="status" class="hidden"></div>
+    <div id="status" class="hidden" role="status" aria-live="assertive"></div>
     <div id="liveTag" class="hidden"><span class="dot"></span><span id="liveTagText">Жду</span></div>
+    <div id="aiState" class="hidden" aria-hidden="true"></div>
 
     <div id="calibBar" class="hidden">
       <p id="calibText">Шаг 1: уберите всё со стола, оставьте только пустую поверхность в рамках, затем нажмите кнопку.</p>
@@ -101,13 +109,13 @@
     </div>
   </div>
 
-  <div id="result">
+  <div id="result" role="status" aria-live="polite">
     <div class="big" id="bigResult">—</div>
     <div class="sub" id="subResult">Идёт калибровка стола и кубиков</div>
   </div>
 
   <div id="controls" class="hidden">
-    <button class="secondary" id="repeatBtn">🔊</button>
+    <button class="secondary" id="repeatBtn" aria-label="Повторить последний результат">🔊</button>
     <button id="recalBtn">Заново откалибровать</button>
   </div>
 
@@ -131,9 +139,12 @@ const calibBtn = document.getElementById('calibBtn');
 const controls = document.getElementById('controls');
 const liveTag = document.getElementById('liveTag');
 const liveTagText = document.getElementById('liveTagText');
+const aiState = document.getElementById('aiState');
 
 let lastPhrase = '';
 let stream = null;
+let watchLoopId = null;
+let aiAvailable = true; // flips to false after AI calls start failing, so we stop retrying every roll
 
 const zones = [
   { x: 0.12, y: 0.30, w: 0.32, h: 0.32, label: '1' },
@@ -164,8 +175,17 @@ async function startCamera() {
     statusEl.classList.add('hidden');
   } catch (err) {
     statusEl.classList.remove('hidden');
-    statusEl.textContent = 'Не удалось включить камеру: ' + err.message;
+    const msg = 'Не удалось включить камеру. ' + describeCameraError(err);
+    statusEl.textContent = msg;
+    speak(msg);
   }
+}
+
+function describeCameraError(err) {
+  if (err && err.name === 'NotAllowedError') return 'Доступ к камере запрещён. Разрешите камеру в настройках браузера и обновите страницу.';
+  if (err && err.name === 'NotFoundError') return 'Камера не найдена на этом устройстве.';
+  if (err && err.name === 'NotReadableError') return 'Камера занята другим приложением.';
+  return (err && err.message) ? err.message : 'Неизвестная ошибка.';
 }
 
 function resizeOverlay() {
@@ -289,6 +309,52 @@ function countPipsInZone(sourceCanvas, z) {
   return blobCount;
 }
 
+// Crops a zone out of a full-res frame into a small square JPEG, base64-encoded (no data-URL prefix).
+function cropZoneBase64(sourceCanvas, z, size) {
+  const sx = Math.round(z.x * sourceCanvas.width);
+  const sy = Math.round(z.y * sourceCanvas.height);
+  const sw = Math.round(z.w * sourceCanvas.width);
+  const sh = Math.round(z.h * sourceCanvas.height);
+  const out = document.createElement('canvas');
+  out.width = size; out.height = size;
+  const octx2 = out.getContext('2d');
+  octx2.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, size, size);
+  return out.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+
+// Asks the /api/detect-dice backend (Claude vision) to read both dice. Returns [d1, d2] or null on any failure.
+async function detectDiceAI(frame) {
+  const images = zones.map(z => cropZoneBase64(frame, z, 320));
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 9000);
+  try {
+    const resp = await fetch('/api/detect-dice', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ images }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!resp.ok) { aiAvailable = false; return null; }
+    const data = await resp.json();
+    const inRange = n => Number.isInteger(n) && n >= 1 && n <= 6;
+    if (!inRange(data.die1) || !inRange(data.die2)) return null;
+    aiAvailable = true;
+    return [data.die1, data.die2];
+  } catch (err) {
+    clearTimeout(timeoutId);
+    aiAvailable = false;
+    return null;
+  }
+}
+
+function setAiState(mode) {
+  aiState.classList.remove('hidden', 'on', 'off');
+  if (mode === 'checking') { aiState.textContent = 'ИИ: проверяю…'; }
+  else if (mode === 'on') { aiState.classList.add('on'); aiState.textContent = 'ИИ-распознавание'; }
+  else { aiState.classList.add('off'); aiState.textContent = 'Локальный режим'; }
+}
+
 function speak(text) {
   if (!('speechSynthesis' in window)) return;
   window.speechSynthesis.cancel();
@@ -300,9 +366,20 @@ function speak(text) {
   window.speechSynthesis.speak(u);
 }
 
-function readDiceNow() {
+async function readDiceNow() {
   const frame = captureFrame();
-  const results = zones.map(z => countPipsInZone(frame, z));
+  let results = null;
+  let usedAI = false;
+
+  if (aiAvailable) {
+    results = await detectDiceAI(frame);
+    if (results) usedAI = true;
+  }
+  if (!results) {
+    results = zones.map(z => countPipsInZone(frame, z));
+  }
+  setAiState(usedAI ? 'on' : 'off');
+
   const total = results.reduce((a,b) => a+b, 0);
   bigResult.textContent = results.join('  —  ');
   subResult.textContent = 'Сумма: ' + total;
@@ -319,6 +396,7 @@ calibBtn.addEventListener('click', () => {
     calibStage = 1;
     calibText.textContent = 'Шаг 2: положите ваши кубики в обе рамки так, как они обычно лежат при игре, затем нажмите кнопку.';
     calibBtn.textContent = 'Кубики видно — запомнить';
+    speak('Стол запомнен. Теперь положите кубики в обе рамки и нажмите кнопку ещё раз.');
   } else if (calibStage === 1) {
     const frame = captureFrame();
     let ok = true;
@@ -344,16 +422,21 @@ calibBtn.addEventListener('click', () => {
       z.dice = { pipIsDark: below <= above };
     });
     if (!ok) {
-      calibText.textContent = 'Не вижу кубиков в одной из рамок — передвиньте их внутрь рамок и нажмите ещё раз.';
+      const msg = 'Не вижу кубиков в одной из рамок. Передвиньте их внутрь рамок и нажмите ещё раз.';
+      calibText.textContent = msg;
+      speak(msg);
       return;
     }
     calibStage = 2;
     calibBar.classList.add('hidden');
     controls.classList.remove('hidden');
     liveTag.classList.remove('hidden');
+    aiState.classList.remove('hidden');
+    setAiState('checking');
     headerText.textContent = 'Слушаю площадку';
     subResult.textContent = 'Киньте кубики — приложение само их услышит';
     drawZones('#5ec98f');
+    speak('Кубики распознаны. Слушаю площадку, можно бросать.');
     startWatching();
   }
 });
@@ -375,7 +458,7 @@ function startWatching() {
 
   setLiveTag('empty');
 
-  const loop = setInterval(() => {
+  watchLoopId = setInterval(() => {
     if (!video.videoWidth) return;
     const frame = captureFrame();
     let allPresent = true;
@@ -418,19 +501,21 @@ function startWatching() {
 }
 
 recalBtn.addEventListener('click', () => {
-  clearInterval; // no-op safeguard
+  if (watchLoopId !== null) { clearInterval(watchLoopId); watchLoopId = null; }
   watching = false;
   awaitingClear = false;
   calibStage = 0;
   calibBar.classList.remove('hidden');
   controls.classList.add('hidden');
   liveTag.classList.add('hidden');
+  aiState.classList.add('hidden');
   calibText.textContent = 'Шаг 1: уберите всё со стола, оставьте только пустую поверхность в рамках, затем нажмите кнопку.';
   calibBtn.textContent = 'Стол пустой — запомнить';
   headerText.textContent = 'Наведите камеру на стол';
   bigResult.textContent = '—';
   subResult.textContent = 'Идёт калибровка стола и кубиков';
   drawZones('#f4b942');
+  speak('Начинаем калибровку заново. Уберите всё со стола.');
 });
 
 startBtn.addEventListener('click', startCamera);
