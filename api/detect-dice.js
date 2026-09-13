@@ -3,7 +3,7 @@
 
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-5';
 const API_KEY = process.env.ANTHROPIC_API_KEY;
-const MAX_IMAGE_CHARS = 2_000_000; // ~1.5MB base64, generous cap for a 320x320 JPEG
+const MAX_IMAGE_CHARS = 4_000_000; // generous cap for a ~1500px JPEG of the whole board zone
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
@@ -96,6 +96,9 @@ module.exports = async (req, res) => {
       console.error('detect-dice: out_of_range', JSON.stringify(parsed));
       res.status(502).json({ error: 'out_of_range' });
       return;
+    }
+    if (die1 === null || die2 === null) {
+      console.log('detect-dice: model could not identify both dice', JSON.stringify(parsed));
     }
 
     res.status(200).json({ die1, die2 });
