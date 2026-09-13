@@ -355,6 +355,20 @@ function speak(text) {
   window.speechSynthesis.speak(u);
 }
 
+// iOS Safari has a known bug where speechSynthesis silently stops firing utterances
+// after a period of inactivity (no error, nothing in the console — it just goes quiet).
+// Periodically nudging pause()+resume() keeps it alive. Cheap and harmless to run
+// indefinitely once the app is actually listening for rolls.
+let speechKeepAliveStarted = false;
+function startSpeechKeepAlive() {
+  if (speechKeepAliveStarted || !('speechSynthesis' in window)) return;
+  speechKeepAliveStarted = true;
+  setInterval(() => {
+    window.speechSynthesis.pause();
+    window.speechSynthesis.resume();
+  }, 5000);
+}
+
 async function readDiceNow(frame, hotBBox) {
   frame = frame || captureFrame();
   const results = await detectDiceAI(frame, hotBBox);
@@ -422,6 +436,7 @@ function setLiveTag(state) {
 function startWatching() {
   if (watching) return;
   watching = true;
+  startSpeechKeepAlive();
   let prevSig = null;
   let stillCount = 0;
   let presentStreak = 0;
