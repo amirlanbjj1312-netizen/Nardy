@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Нарды — кубики вслух</title>
+<style>
+  :root{
+    --bg: #10151c;
+    --panel: #182230;
+    --line: #f4b942;
+    --text: #f5f2ea;
+    --dim: #93a1b3;
+    --good: #5ec98f;
+    --bad: #e2604f;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; height: 100%; width: 100%; }
+  header { padding: 14px 16px 10px; text-align: center; flex-shrink: 0; }
+  h1 { margin: 0; font-size: 21px; font-weight: 700; letter-spacing: 0.2px; }
+  #stage {
+    position: relative; flex: 1; min-height: 0; background: #000;
+    display: flex; align-items: center; justify-content: center;
+  }
+  video, canvas.overlay {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover;
+  }
+  canvas.overlay { pointer-events: none; }
+  #result { flex-shrink: 0; text-align: center; padding: 14px 16px 6px; min-height: 74px; }
+  #result .big { font-size: 46px; font-weight: 800; line-height: 1.05; }
+  #result .sub { font-size: 16px; color: var(--dim); margin-top: 4px; }
+  #controls { flex-shrink: 0; display: flex; gap: 10px; padding: 8px 16px 20px; }
+  button {
+    flex: 1; font-size: 21px; font-weight: 700; padding: 18px 10px;
+    border-radius: 16px; border: none; color: var(--bg); background: var(--line);
+  }
+  button.secondary {
+    background: var(--panel); color: var(--text); border: 2px solid var(--dim);
+    flex: 0 0 74px; font-size: 24px;
+  }
+  button:active { transform: scale(0.97); }
+  button:disabled { opacity: 0.4; }
+  #startScreen {
+    position: absolute; inset: 0; background: var(--bg);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 30px; gap: 16px; z-index: 20;
+  }
+  #startScreen p { color: var(--dim); font-size: 16px; max-width: 320px; line-height: 1.5; }
+  #startScreen button { width: 240px; flex: none; }
+  .hidden { display: none !important; }
+  #calibBar {
+    position: absolute; left: 10px; right: 10px; bottom: 10px;
+    background: rgba(0,0,0,0.55); border: 2px solid var(--line);
+    border-radius: 14px; padding: 12px; text-align: center; z-index: 15;
+  }
+  #calibBar p { margin: 0 0 10px; font-size: 16px; }
+  #calibBar button { width: 100%; padding: 14px; font-size: 18px; }
+  #status {
+    position: absolute; top: 10px; left: 10px; right: 10px; text-align: center;
+    font-size: 14px; color: var(--dim); background: rgba(0,0,0,0.4);
+    padding: 4px; border-radius: 8px; z-index: 12;
+  }
+  #liveTag {
+    position: absolute; top: 10px; left: 10px;
+    background: rgba(0,0,0,0.55); color: var(--dim); font-size: 13px;
+    padding: 4px 10px; border-radius: 20px; z-index: 12;
+    display: flex; align-items: center; gap: 6px;
+  }
+  #liveTag .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  #liveTag.watching .dot { background: var(--good); }
+  #liveTag.settled .dot { background: var(--line); }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="startScreen">
+    <h1 style="font-size:26px">Кубики нард вслух</h1>
+    <p>Приложение сначала запомнит пустой стол и ваши кубики, а дальше будет само слушать площадку и озвучивать броски — без нажатия кнопок.</p>
+    <button id="startBtn">Включить камеру</button>
+  </div>
+
+  <header><h1 id="headerText">Наведите камеру на стол</h1></header>
+
+  <div id="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay" class="overlay"></canvas>
+    <div id="status" class="hidden"></div>
+    <div id="liveTag" class="hidden"><span class="dot"></span><span id="liveTagText">Жду</span></div>
+
+    <div id="calibBar" class="hidden">
+      <p id="calibText">Шаг 1: уберите всё со стола, оставьте только пустую поверхность в рамках, затем нажмите кнопку.</p>
+      <button id="calibBtn">Стол пустой — запомнить</button>
+    </div>
+  </div>
+
+  <div id="result">
+    <div class="big" id="bigResult">—</div>
+    <div class="sub" id="subResult">Идёт калибровка стола и кубиков</div>
+  </div>
+
+  <div id="controls" class="hidden">
+    <button class="secondary" id="repeatBtn">🔊</button>
+    <button id="recalBtn">Заново откалибровать</button>
+  </div>
+
+</div>
+
+<script>
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d', { willReadFrequently: true });
+const startScreen = document.getElementById('startScreen');
+const startBtn = document.getElementById('startBtn');
+const repeatBtn = document.getElementById('repeatBtn');
+const recalBtn = document.getElementById('recalBtn');
+const bigResult = document.getElementById('bigResult');
+const subResult = document.getElementById('subResult');
+const statusEl = document.getElementById('status');
+const headerText = document.getElementById('headerText');
+const calibBar = document.getElementById('calibBar');
+const calibText = document.getElementById('calibText');
+const calibBtn = document.getElementById('calibBtn');
+const controls = document.getElementById('controls');
+const liveTag = document.getElementById('liveTag');
+const liveTagText = document.getElementById('liveTagText');
+
+let lastPhrase = '';
+let stream = null;
+
+const zones = [
+  { x: 0.12, y: 0.30, w: 0.32, h: 0.32, label: '1' },
+  { x: 0.56, y: 0.30, w: 0.32, h: 0.32, label: '2' }
+];
+
+// calibration state per zone
+// bg: {mean} of empty table; dice: {mean, pipIsDark, footprintScore} with dice present
+zones.forEach(z => { z.bg = null; z.dice = null; });
+
+let calibStage = 0; // 0 = capture empty table, 1 = capture dice, 2 = done
+let watching = false;
+let stillFrames = 0;
+let awaitingClear = false; // true right after an announcement, until zone empties again
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    startScreen.classList.add('hidden');
+    resizeOverlay();
+    drawZones();
+    calibBar.classList.remove('hidden');
+    statusEl.classList.add('hidden');
+  } catch (err) {
+    statusEl.classList.remove('hidden');
+    statusEl.textContent = 'Не удалось включить камеру: ' + err.message;
+  }
+}
+
+function resizeOverlay() {
+  const rect = video.getBoundingClientRect();
+  overlay.width = rect.width;
+  overlay.height = rect.height;
+}
+window.addEventListener('resize', () => { resizeOverlay(); drawZones(); });
+
+function drawZones(activeColor) {
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  octx.lineWidth = 3;
+  octx.font = '16px sans-serif';
+  zones.forEach(z => {
+    const x = z.x * overlay.width;
+    const y = z.y * overlay.height;
+    const w = z.w * overlay.width;
+    const h = z.h * overlay.height;
+    const color = activeColor || '#f4b942';
+    octx.strokeStyle = color;
+    octx.fillStyle = color;
+    octx.strokeRect(x, y, w, h);
+    octx.fillText('Кубик ' + z.label, x + 6, y - 8 < 14 ? y + 20 : y - 8);
+  });
+}
+
+function captureFrame() {
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+// downscaled grayscale mean + histogram signature for a zone, used for cheap presence/stillness checks
+function zoneSignature(canvas, z) {
+  const sx = Math.round(z.x * canvas.width);
+  const sy = Math.round(z.y * canvas.height);
+  const sw = Math.round(z.w * canvas.width);
+  const sh = Math.round(z.h * canvas.height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const small = document.createElement('canvas');
+  small.width = 24; small.height = 24;
+  const sctx = small.getContext('2d', { willReadFrequently: true });
+  sctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, 24, 24);
+  const data = sctx.getImageData(0, 0, 24, 24).data;
+  const gray = new Float32Array(24*24);
+  let sum = 0;
+  for (let i = 0; i < 24*24; i++) {
+    const v = 0.299*data[i*4] + 0.587*data[i*4+1] + 0.114*data[i*4+2];
+    gray[i] = v;
+    sum += v;
+  }
+  return { gray, mean: sum/(24*24) };
+}
+
+function sigDiff(a, b) {
+  let d = 0;
+  for (let i = 0; i < a.gray.length; i++) d += Math.abs(a.gray[i] - b.gray[i]);
+  return d / a.gray.length;
+}
+
+// full-res pip counting within a zone (same approach as before, tuned by calibration if available)
+function countPipsInZone(sourceCanvas, z) {
+  const sx = Math.round(z.x * sourceCanvas.width);
+  const sy = Math.round(z.y * sourceCanvas.height);
+  const sw = Math.round(z.w * sourceCanvas.width);
+  const sh = Math.round(z.h * sourceCanvas.height);
+  const sctx = sourceCanvas.getContext('2d', { willReadFrequently: true });
+  const imgData = sctx.getImageData(sx, sy, sw, sh);
+  const data = imgData.data;
+  const n = sw * sh;
+
+  const gray = new Float32Array(n);
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const v = 0.299*data[i*4] + 0.587*data[i*4+1] + 0.114*data[i*4+2];
+    gray[i] = v; sum += v;
+  }
+  const mean = sum / n;
+
+  let pipIsDark;
+  if (z.dice && typeof z.dice.pipIsDark === 'boolean') {
+    pipIsDark = z.dice.pipIsDark;
+  } else {
+    let below = 0, above = 0;
+    for (let i = 0; i < n; i++) {
+      if (gray[i] < mean - 25) below++; else if (gray[i] > mean + 25) above++;
+    }
+    pipIsDark = below <= above;
+  }
+
+  const visited = new Uint8Array(n);
+  const threshold = 25;
+  function isPip(i) { return pipIsDark ? (gray[i] < mean - threshold) : (gray[i] > mean + threshold); }
+
+  let blobCount = 0;
+  const stack = [];
+  const minSize = Math.max(4, Math.round(n * 0.0008));
+  const maxSize = Math.round(n * 0.06);
+
+  for (let idx = 0; idx < n; idx++) {
+    if (visited[idx] || !isPip(idx)) continue;
+    stack.length = 0; stack.push(idx); visited[idx] = 1;
+    let size = 0;
+    while (stack.length) {
+      const cur = stack.pop(); size++;
+      const cx = cur % sw, cy = (cur / sw) | 0;
+      const nb = [[cx-1,cy],[cx+1,cy],[cx,cy-1],[cx,cy+1]];
+      for (const [nx, ny] of nb) {
+        if (nx < 0 || ny < 0 || nx >= sw || ny >= sh) continue;
+        const ni = ny*sw + nx;
+        if (!visited[ni] && isPip(ni)) { visited[ni] = 1; stack.push(ni); }
+      }
+    }
+    if (size >= minSize && size <= maxSize) blobCount++;
+  }
+  if (blobCount > 6) blobCount = 6;
+  if (blobCount < 1) blobCount = 1;
+  return blobCount;
+}
+
+function speak(text) {
+  if (!('speechSynthesis' in window)) return;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'ru-RU'; u.rate = 0.95; u.pitch = 1.0;
+  const voices = window.speechSynthesis.getVoices();
+  const ru = voices.find(v => v.lang && v.lang.startsWith('ru'));
+  if (ru) u.voice = ru;
+  window.speechSynthesis.speak(u);
+}
+
+function readDiceNow() {
+  const frame = captureFrame();
+  const results = zones.map(z => countPipsInZone(frame, z));
+  const total = results.reduce((a,b) => a+b, 0);
+  bigResult.textContent = results.join('  —  ');
+  subResult.textContent = 'Сумма: ' + total;
+  const phrase = 'Выпало ' + results.join(' и ') + '. Всего ' + total + '.';
+  lastPhrase = phrase;
+  speak(phrase);
+}
+
+// --- Calibration flow ---
+calibBtn.addEventListener('click', () => {
+  if (calibStage === 0) {
+    const frame = captureFrame();
+    zones.forEach(z => { z.bgSig = zoneSignature(frame, z); });
+    calibStage = 1;
+    calibText.textContent = 'Шаг 2: положите ваши кубики в обе рамки так, как они обычно лежат при игре, затем нажмите кнопку.';
+    calibBtn.textContent = 'Кубики видно — запомнить';
+  } else if (calibStage === 1) {
+    const frame = captureFrame();
+    let ok = true;
+    zones.forEach(z => {
+      const sig = zoneSignature(frame, z);
+      const diff = sigDiff(sig, z.bgSig);
+      if (diff < 6) ok = false; // nothing new detected in this zone
+      // determine pip polarity using full-res crop
+      const sx = Math.round(z.x * frame.width), sy = Math.round(z.y * frame.height);
+      const sw = Math.round(z.w * frame.width), sh = Math.round(z.h * frame.height);
+      const ctx = frame.getContext('2d', { willReadFrequently: true });
+      const data = ctx.getImageData(sx, sy, sw, sh).data;
+      const n = sw*sh;
+      let sum = 0;
+      const gray = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const v = 0.299*data[i*4]+0.587*data[i*4+1]+0.114*data[i*4+2];
+        gray[i]=v; sum+=v;
+      }
+      const mean = sum/n;
+      let below=0, above=0;
+      for (let i=0;i<n;i++){ if (gray[i]<mean-25) below++; else if (gray[i]>mean+25) above++; }
+      z.dice = { pipIsDark: below <= above };
+    });
+    if (!ok) {
+      calibText.textContent = 'Не вижу кубиков в одной из рамок — передвиньте их внутрь рамок и нажмите ещё раз.';
+      return;
+    }
+    calibStage = 2;
+    calibBar.classList.add('hidden');
+    controls.classList.remove('hidden');
+    liveTag.classList.remove('hidden');
+    headerText.textContent = 'Слушаю площадку';
+    subResult.textContent = 'Киньте кубики — приложение само их услышит';
+    drawZones('#5ec98f');
+    startWatching();
+  }
+});
+
+function setLiveTag(state) {
+  liveTag.classList.remove('watching', 'settled');
+  if (state === 'empty') { liveTagText.textContent = 'Жду бросок'; }
+  else if (state === 'moving') { liveTag.classList.add('watching'); liveTagText.textContent = 'Вижу кубики...'; }
+  else if (state === 'settled') { liveTag.classList.add('settled'); liveTagText.textContent = 'Читаю...'; }
+}
+
+// Lightweight loop: every 350ms compare a cheap downscaled signature per zone
+// against background to detect presence, and against the previous check to detect stillness.
+function startWatching() {
+  if (watching) return;
+  watching = true;
+  let prevSigs = zones.map(() => null);
+  let stillCounts = zones.map(() => 0);
+
+  setLiveTag('empty');
+
+  const loop = setInterval(() => {
+    if (!video.videoWidth) return;
+    const frame = captureFrame();
+    let allPresent = true;
+    let allStill = true;
+    let anyPresent = false;
+
+    zones.forEach((z, i) => {
+      const sig = zoneSignature(frame, z);
+      const bgDiff = sigDiff(sig, z.bgSig);
+      const present = bgDiff > 6;
+      if (present) anyPresent = true; else allPresent = false;
+
+      if (prevSigs[i] && present) {
+        const moveDiff = sigDiff(sig, prevSigs[i]);
+        if (moveDiff < 2.5) stillCounts[i]++; else stillCounts[i] = 0;
+      } else {
+        stillCounts[i] = 0;
+      }
+      if (stillCounts[i] < 3) allStill = false;
+      prevSigs[i] = sig;
+    });
+
+    if (!anyPresent) {
+      awaitingClear = false;
+      setLiveTag('empty');
+      return;
+    }
+    if (awaitingClear) {
+      setLiveTag('moving');
+      return; // already announced this occurrence, wait for table to clear first
+    }
+    if (allPresent && allStill) {
+      setLiveTag('settled');
+      readDiceNow();
+      awaitingClear = true;
+    } else {
+      setLiveTag('moving');
+    }
+  }, 350);
+}
+
+recalBtn.addEventListener('click', () => {
+  clearInterval; // no-op safeguard
+  watching = false;
+  awaitingClear = false;
+  calibStage = 0;
+  calibBar.classList.remove('hidden');
+  controls.classList.add('hidden');
+  liveTag.classList.add('hidden');
+  calibText.textContent = 'Шаг 1: уберите всё со стола, оставьте только пустую поверхность в рамках, затем нажмите кнопку.';
+  calibBtn.textContent = 'Стол пустой — запомнить';
+  headerText.textContent = 'Наведите камеру на стол';
+  bigResult.textContent = '—';
+  subResult.textContent = 'Идёт калибровка стола и кубиков';
+  drawZones('#f4b942');
+});
+
+startBtn.addEventListener('click', startCamera);
+repeatBtn.addEventListener('click', () => { if (lastPhrase) speak(lastPhrase); });
+
+if ('speechSynthesis' in window) { window.speechSynthesis.onvoiceschanged = () => {}; }
+</script>
+</body>
+</html>
