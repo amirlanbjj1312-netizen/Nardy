@@ -145,10 +145,13 @@ let lastPhrase = '';
 let stream = null;
 let watchLoopId = null;
 
-// One wide zone covering almost the whole frame — dice can land anywhere on the
-// board, not in a small pre-marked box, so the AI is given the whole area and
-// has to locate both dice itself.
-const boardZone = { x: 0.04, y: 0.06, w: 0.92, h: 0.88, bgSig: null };
+// A wide zone covering the near half of the board (not the whole frame) — dice can
+// land anywhere within it, so the AI has to locate both dice itself, but restricting
+// it to one player's side means the opponent's rolls elsewhere on the board don't
+// trigger it, and the smaller area also means more effective resolution per die.
+// Tune y/h if this doesn't line up with your camera angle — see the drawn "Зона
+// броска" outline while calibrating.
+const boardZone = { x: 0.04, y: 0.06, w: 0.92, h: 0.44, bgSig: null };
 
 let calibStage = 0; // 0 = capture empty table, 1 = capture dice, 2 = done
 let watching = false;
