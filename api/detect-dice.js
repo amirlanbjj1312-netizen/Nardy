@@ -24,29 +24,25 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const images = Array.isArray(body.images) ? body.images : null;
-  if (!images || images.length !== 2) {
-    res.status(400).json({ error: 'need_two_images' });
+  const image = body.image;
+  if (typeof image !== 'string' || image.length === 0 || image.length > MAX_IMAGE_CHARS) {
+    res.status(400).json({ error: 'bad_image' });
     return;
-  }
-  for (const img of images) {
-    if (typeof img !== 'string' || img.length === 0 || img.length > MAX_IMAGE_CHARS) {
-      res.status(400).json({ error: 'bad_image' });
-      return;
-    }
   }
 
   const content = [
     {
       type: 'text',
-      text: 'На этих двух изображениях — по одному игральному кубику (кубику нард) крупным планом, каждый на отдельной картинке. ' +
-        'Определи число очков (от 1 до 6) на верхней грани каждого кубика. ' +
+      text: 'Это фотография части игрового стола нард (backgammon) сразу после броска. ' +
+        'На столе также может быть доска с плоскими круглыми шашками — это не кубики, не путай их с кубиками. ' +
+        'Найди на фото ровно два игральных кубика (кубики с точками от 1 до 6 на гранях, лежащие где угодно в кадре) ' +
+        'и определи число очков на верхней грани каждого. ' +
         'Ответь СТРОГО в виде JSON без каких-либо пояснений и без markdown-разметки, в формате ' +
         '{"die1": <1-6 или null>, "die2": <1-6 или null>}. ' +
-        'Если кубик на изображении не виден чётко, размыт, обрезан или число очков определить нельзя — верни null для этого кубика.'
+        'Если на фото не ровно два кубика, кубик не виден чётко, размыт, частично обрезан или число очков определить нельзя — ' +
+        'верни null для соответствующего кубика (или для обоих).'
     },
-    { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: images[0] } },
-    { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: images[1] } }
+    { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: image } }
   ];
 
   const controller = new AbortController();
